@@ -136,6 +136,16 @@ class SuperBizAgentApp {
         this.scrollToBottom();
     }
 
+    renderStreamingPreview(messageElement, content) {
+        if (!messageElement) return;
+
+        const messageContent = messageElement.querySelector('.message-content');
+        if (!messageContent) return;
+
+        messageContent.textContent = content;
+        this.scrollToBottom();
+    }
+
     // 高亮代码块
     highlightCodeBlocks(container) {
         if (typeof hljs !== 'undefined' && container) {
@@ -636,6 +646,7 @@ class SuperBizAgentApp {
         // 设置发送状态
         this.isStreaming = true;
         this.updateUI();
+        this.showLoadingOverlay(true);
 
         try {
             if (this.currentMode === 'quick') {
@@ -648,6 +659,7 @@ class SuperBizAgentApp {
             this.addMessage('assistant', '抱歉，发送消息时出现错误：' + error.message);
         } finally {
             this.isStreaming = false;
+            this.showLoadingOverlay(false);
             this.updateUI();
             
             // 如果当前对话是从历史记录加载的，更新历史记录
@@ -709,6 +721,8 @@ class SuperBizAgentApp {
             // 创建助手消息元素
             const assistantMessageElement = this.addMessage('assistant', '', true);
             let fullResponse = '';
+            let finalResponse = '';
+            let firstMessageChunkReceived = false;
 
             // 处理流式响应
             const reader = response.body.getReader();
@@ -720,17 +734,18 @@ class SuperBizAgentApp {
                 while (true) {
                     const { done, value } = await reader.read();
                     
-                    if (done) {
-                        // 流结束，将内容转换为Markdown渲染
-                        if (assistantMessageElement) {
-                            assistantMessageElement.classList.remove('streaming');
-                            this.renderStreamingMessage(assistantMessageElement, fullResponse);
-                        }
+                        if (done) {
+                            const completedResponse = finalResponse || fullResponse;
+                            // 流结束，将内容转换为Markdown渲染
+                            if (assistantMessageElement) {
+                                assistantMessageElement.classList.remove('streaming');
+                                this.renderStreamingMessage(assistantMessageElement, completedResponse);
+                            }
                         // 保存流式消息到历史记录
-                        if (fullResponse) {
+                        if (completedResponse) {
                             this.currentChatHistory.push({
                                 type: 'assistant',
-                                content: fullResponse,
+                                content: completedResponse,
                                 timestamp: new Date().toISOString()
                             });
                             // 如果当前对话是从历史记录加载的，更新历史记录
@@ -760,17 +775,20 @@ class SuperBizAgentApp {
                             currentEvent = line.substring(7);
                             if (currentEvent === 'connected') {
                                 console.log('流式连接确认');
+                            } else if (currentEvent === 'final') {
+                                continue;
                             } else if (currentEvent === 'done') {
+                                const completedResponse = finalResponse || fullResponse;
                                 // 流结束，将内容转换为Markdown渲染
                                 if (assistantMessageElement) {
                                     assistantMessageElement.classList.remove('streaming');
-                                    this.renderStreamingMessage(assistantMessageElement, fullResponse);
+                                    this.renderStreamingMessage(assistantMessageElement, completedResponse);
                                 }
                                 // 保存流式消息到历史记录
-                                if (fullResponse) {
+                                if (completedResponse) {
                                     this.currentChatHistory.push({
                                         type: 'assistant',
-                                        content: fullResponse,
+                                        content: completedResponse,
                                         timestamp: new Date().toISOString()
                                     });
                                     // 如果当前对话是从历史记录加载的，更新历史记录
@@ -785,16 +803,17 @@ class SuperBizAgentApp {
                         } else if (line.startsWith('data: ')) {
                             const data = line.substring(6);
                             if (data === '[DONE]') {
+                                const completedResponse = finalResponse || fullResponse;
                                 // 流结束标记，将内容转换为Markdown渲染
                                 if (assistantMessageElement) {
                                     assistantMessageElement.classList.remove('streaming');
-                                    this.renderStreamingMessage(assistantMessageElement, fullResponse);
+                                    this.renderStreamingMessage(assistantMessageElement, completedResponse);
                                 }
                                 // 保存流式消息到历史记录
-                                if (fullResponse) {
+                                if (completedResponse) {
                                     this.currentChatHistory.push({
                                         type: 'assistant',
-                                        content: fullResponse,
+                                        content: completedResponse,
                                         timestamp: new Date().toISOString()
                                     });
                                     // 如果当前对话是从历史记录加载的，更新历史记录
@@ -806,16 +825,31 @@ class SuperBizAgentApp {
                                 return;
                             }
                             
-                            // 只处理message事件的数据
-                            if (currentEvent === 'message') {
+                            if (currentEvent === 'final') {
+                                const finalChunk = this.extractTextPayload(data);
+                                if (finalChunk === '') {
+                                    finalResponse += '\n';
+                                } else if (finalResponse === '') {
+                                    finalResponse = finalChunk;
+                                } else {
+                                    finalResponse += `\n${finalChunk}`;
+                                }
+                                if (!firstMessageChunkReceived) {
+                                    this.showLoadingOverlay(false);
+                                    firstMessageChunkReceived = true;
+                                }
+                            } else if (currentEvent === 'message') {
                                 // 如果 data 为空字符串，认为是换行
                                 if (data === '') {
                                     fullResponse += '\n';
                                 } else {
                                     fullResponse += data;
                                 }
-
-                                this.renderStreamingMessage(assistantMessageElement, fullResponse);
+                                if (!firstMessageChunkReceived && fullResponse.trim() !== '') {
+                                    this.showLoadingOverlay(false);
+                                    firstMessageChunkReceived = true;
+                                }
+                                this.renderStreamingPreview(assistantMessageElement, fullResponse);
                             }
                         }
                     }
@@ -1122,6 +1156,7 @@ class SuperBizAgentApp {
             
             if (data.message === 'OK' && data.data) {
                 const responseText = this.extractTextPayload(data.data.result);
+                this.showLoadingOverlay(false);
                 
                 // 更新消息内容
                 this.updateTravelAdvisorMessage(loadingMessageElement, responseText, data.data.detail || []);
@@ -1330,6 +1365,7 @@ class SuperBizAgentApp {
         // 设置发送状态
         this.isStreaming = true;
         this.updateUI();
+        this.showLoadingOverlay(true);
 
         try {
             await this.sendTravelAdvisorRequest(loadingMessage, question);
@@ -1345,6 +1381,7 @@ class SuperBizAgentApp {
         } finally {
             this.isStreaming = false;
             this.currentAIOpsMessage = null;
+            this.showLoadingOverlay(false);
             this.updateUI();
         }
     }

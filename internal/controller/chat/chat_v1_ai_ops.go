@@ -31,6 +31,7 @@ func (c *ControllerV1) AIOps(ctx context.Context, req *v1.AIOpsReq) (res *v1.AIO
 		sessionMemory := mem.GetSimpleMemory(req.Id)
 		sessionMemory.UpdateTravelProfile(storedQuestion)
 		travelProfile := sessionMemory.GetTravelProfile()
+		log.Printf("[travel_advisor] profile updated, session=%s, destination=%q, travel_date=%q", req.Id, travelProfile.Destination, travelProfile.TravelDate)
 		profileSummary = travelProfile.Summary()
 		missingSummary = summarizeMissingSlots(travelProfile)
 		stageSummary = travelProfile.StageSummary()
@@ -51,7 +52,7 @@ func (c *ControllerV1) AIOps(ctx context.Context, req *v1.AIOpsReq) (res *v1.AIO
 	4. 涉及时间判断时，先调用 get_current_time。
 	5. 如果用户信息不足，不要直接生成完整 itinerary，而是先提出 4 到 5 个最关键的澄清问题。
 	6. 如果用户已经给了较明确的目的地或需求，就先给一版方向性建议，再告诉用户你还可以继续展开成详细行程。
-	7. 如果额外补充信息里已经带有实时天气结果，要把天气融入行程、住宿、出行和穿衣建议，而不是只复述天气。
+	7. 如果额外补充信息里已经带有实时天气结果，要直接基于这些天气信息输出规划，把天气融入行程、住宿、出行和穿衣建议，而不是只复述天气，也不要再说“我来帮你查天气”。
 	8. 如果额外补充信息里已经带有预订跳转信息，要把链接整理进“预订建议”部分，并继续完成旅行规划，不要只贴链接。
 
 输出要求：
@@ -81,10 +82,42 @@ func (c *ControllerV1) AIOps(ctx context.Context, req *v1.AIOpsReq) (res *v1.AIO
 	用户当前输入：
 	` + userQuestion
 
-	primaryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	log.Printf("[travel_advisor] primary plan agent started, session=%s, question=%q", req.Id, userQuestion)
-	resp, detail, err := plan_execute_replan.BuildPlanAgent(primaryCtx, query)
+	var resp string
+	var detail []string
+	if req.Id != "" {
+		sessionMemory := mem.GetSimpleMemory(req.Id)
+		travelProfile := sessionMemory.GetTravelProfile()
+		if shouldUseDirectPlanningFlow(userQuestion, travelProfile, supplementalContext) {
+			directCtx, directCancel := context.WithTimeout(ctx, 45*time.Second)
+			defer directCancel()
+			log.Printf("[travel_advisor] unified direct planning flow started, session=%s", req.Id)
+			out, directErr := chat_pipeline.InvokeDirectChat(directCtx, &chat_pipeline.UserMessage{
+				ID:                   req.Id,
+				Query:                userQuestion,
+				History:              sessionMemory.GetMessages(),
+				TravelProfileSummary: profileSummary,
+				MissingSlotsSummary:  missingSummary,
+				TravelStageSummary:   stageSummary,
+				ResponseTemplateHint: responseTemplate,
+				StructuredOutputHint: structuredOutput,
+				SupplementalContext:  supplementalContext,
+			})
+			if directErr == nil {
+				resp = normalizeAssistantText(out.Content)
+				detail = nil
+				log.Printf("[travel_advisor] unified direct planning flow completed, session=%s, chars=%d", req.Id, len(resp))
+			} else {
+				log.Printf("[travel_advisor] unified direct planning flow failed, session=%s, err=%v", req.Id, directErr)
+			}
+		}
+	}
+
+	if resp == "" {
+		primaryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		log.Printf("[travel_advisor] primary plan agent started, session=%s, question=%q", req.Id, userQuestion)
+		resp, detail, err = plan_execute_replan.BuildPlanAgent(primaryCtx, query)
+	}
 	if err != nil {
 		log.Printf("[travel_advisor] primary plan agent failed, falling back to direct chat, session=%s, err=%v", req.Id, err)
 		userMessage := &chat_pipeline.UserMessage{

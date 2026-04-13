@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -19,6 +20,7 @@ func (c *ControllerV1) Chat(ctx context.Context, req *v1.ChatReq) (res *v1.ChatR
 	sessionMemory := mem.GetSimpleMemory(id)
 	sessionMemory.UpdateTravelProfile(msg)
 	travelProfile := sessionMemory.GetTravelProfile()
+	log.Printf("[chat] profile updated, session=%s, destination=%q, travel_date=%q", id, travelProfile.Destination, travelProfile.TravelDate)
 	supplementalContext := buildTravelRuntimeContext(ctx, msg, travelProfile)
 	userMessage := &chat_pipeline.UserMessage{
 		ID:                   id,
@@ -33,9 +35,23 @@ func (c *ControllerV1) Chat(ctx context.Context, req *v1.ChatReq) (res *v1.ChatR
 	}
 
 	var out *schema.Message
+	var runner compose.Runnable[*chat_pipeline.UserMessage, *schema.Message]
+	if shouldUseDirectPlanningFlow(msg, travelProfile, supplementalContext) {
+		directCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		log.Printf("[chat] direct planning flow started, session=%s", id)
+		out, err = chat_pipeline.InvokeDirectChat(directCtx, userMessage)
+		if err == nil && out != nil {
+			log.Printf("[chat] direct planning flow completed, session=%s, chars=%d", id, len(out.Content))
+		}
+	}
 
-	runner, err := chat_pipeline.BuildChatAgent(ctx)
-	if err == nil {
+	if err == nil && out == nil {
+		builtRunner, buildErr := chat_pipeline.BuildChatAgent(ctx)
+		err = buildErr
+		runner = builtRunner
+	}
+	if err == nil && out == nil {
 		primaryCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 		defer cancel()
 		log.Printf("[chat] primary agent started, session=%s, query=%q", id, msg)

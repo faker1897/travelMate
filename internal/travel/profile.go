@@ -22,6 +22,18 @@ type Profile struct {
 	ReturnDate    string
 }
 
+func (p Profile) HasPlanningDate() bool {
+	return strings.TrimSpace(p.TravelDate) != ""
+}
+
+func (p Profile) HasPlanningDestination() bool {
+	return strings.TrimSpace(p.Destination) != "" || strings.TrimSpace(p.EffectiveArrivalCity()) != ""
+}
+
+func (p Profile) IsPlanningReadyForWeather() bool {
+	return p.HasPlanningDestination() && p.HasPlanningDate()
+}
+
 func ExtractProfile(text string) Profile {
 	normalized := normalizeText(text)
 	profile := Profile{}
@@ -260,6 +272,7 @@ func (p Profile) ResponseTemplateHint() string {
 
 ## 如果你愿意，我下一步可以继续细化
 - 告诉用户你可以继续展开门票预约、住宿区域、预算拆分或更细日程
+- 如果你觉得规划已经确定，可以再联系我订购机票和酒店
 `)
 	}
 }
@@ -324,6 +337,7 @@ func (p Profile) StructuredOutputHint() string {
 
 ## 如果你愿意，我下一步还能继续细化
 - 说明可继续展开预算拆分、门票预约、餐厅选择或更细日程
+- 如果你觉得规划已经确定，可以再联系我订购机票和酒店
 `)
 	}
 }
@@ -414,7 +428,24 @@ func extractTravelDate(text string) string {
 		}
 	}
 
+	rangePatterns := []string{
+		`([0-9]{1,2})\.([0-9]{1,2})\s*(?:到|至|-|—|~|～)\s*([0-9]{1,2})\.([0-9]{1,2})`,
+		`([0-9]{1,2})月([0-9]{1,2})[日号]?\s*(?:到|至|-|—|~|～)\s*([0-9]{1,2})月([0-9]{1,2})[日号]?`,
+		`([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})[日号]?\s*(?:到|至|-|—|~|～)\s*([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})[日号]?`,
+	}
+	for _, pattern := range rangePatterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(text)
+		if len(matches) == 5 {
+			return fmt.Sprintf("%s月%s日-%s月%s日", matches[1], matches[2], matches[3], matches[4])
+		}
+		if len(matches) == 7 {
+			return fmt.Sprintf("%s年%s月%s日-%s年%s月%s日", matches[1], matches[2], matches[3], matches[4], matches[5], matches[6])
+		}
+	}
+
 	patterns := []string{
+		`([0-9]{1,2}\.[0-9]{1,2})`,
 		`([0-9]{1,2}月[0-9]{1,2}[日号]?)`,
 		`([0-9]{4}年[0-9]{1,2}月[0-9]{1,2}[日号]?)`,
 		`([0-9]{1,2}月)`,
@@ -423,6 +454,12 @@ func extractTravelDate(text string) string {
 		re := regexp.MustCompile(pattern)
 		matches := re.FindStringSubmatch(text)
 		if len(matches) > 1 {
+			if strings.Contains(matches[1], ".") {
+				parts := strings.Split(matches[1], ".")
+				if len(parts) == 2 {
+					return fmt.Sprintf("%s月%s日", parts[0], parts[1])
+				}
+			}
 			return matches[1]
 		}
 	}

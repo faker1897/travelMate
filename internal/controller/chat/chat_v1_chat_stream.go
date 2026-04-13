@@ -21,6 +21,7 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 	sessionMemory := mem.GetSimpleMemory(id)
 	sessionMemory.UpdateTravelProfile(msg)
 	travelProfile := sessionMemory.GetTravelProfile()
+	log.Printf("[chat_stream] profile updated, session=%s, destination=%q, travel_date=%q", id, travelProfile.Destination, travelProfile.TravelDate)
 	supplementalContext := buildTravelRuntimeContext(ctx, msg, travelProfile)
 
 	ctx = context.WithValue(ctx, "client_id", req.Id)
@@ -43,6 +44,26 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 
 	var fullResponse strings.Builder
 
+	if shouldUseDirectPlanningFlow(msg, travelProfile, supplementalContext) {
+		directCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		log.Printf("[chat_stream] direct planning flow started, session=%s", id)
+		out, directErr := chat_pipeline.InvokeDirectChat(directCtx, userMessage)
+		if directErr != nil {
+			log.Printf("[chat_stream] direct planning flow failed, session=%s, err=%v", id, directErr)
+		} else {
+			content := normalizeAssistantText(out.Content)
+			fullResponse.WriteString(content)
+			sessionMemory.SetMessages(schema.UserMessage(msg))
+			sessionMemory.SetMessages(schema.AssistantMessage(content, nil))
+			log.Printf("[chat_stream] direct planning flow completed, session=%s, chars=%d", id, len(content))
+			client.SendToClient("message", content)
+			client.SendToClient("final", content)
+			client.SendToClient("done", "Stream completed")
+			return &v1.ChatStreamRes{}, nil
+		}
+	}
+
 	runner, err := chat_pipeline.BuildChatAgent(ctx)
 	if err == nil {
 		primaryCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
@@ -54,7 +75,7 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 			defer sr.Close()
 
 			defer func() {
-				completeResponse := fullResponse.String()
+				completeResponse := normalizeAssistantText(fullResponse.String())
 				if completeResponse != "" {
 					sessionMemory.SetMessages(schema.UserMessage(msg))
 					sessionMemory.SetMessages(schema.AssistantMessage(completeResponse, nil))
@@ -64,7 +85,11 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 			for {
 				chunk, recvErr := sr.Recv()
 				if errors.Is(recvErr, io.EOF) {
-					log.Printf("[chat_stream] primary stream completed, session=%s, chars=%d", id, len(fullResponse.String()))
+					finalResponse := normalizeAssistantText(fullResponse.String())
+					log.Printf("[chat_stream] primary stream completed, session=%s, chars=%d", id, len(finalResponse))
+					if finalResponse != "" {
+						client.SendToClient("final", finalResponse)
+					}
 					client.SendToClient("done", "Stream completed")
 					return &v1.ChatStreamRes{}, nil
 				}
@@ -73,9 +98,8 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 					client.SendToClient("error", recvErr.Error())
 					return &v1.ChatStreamRes{}, nil
 				}
-				normalizedChunk := normalizeAssistantText(chunk.Content)
-				fullResponse.WriteString(normalizedChunk)
-				client.SendToClient("message", normalizedChunk)
+				fullResponse.WriteString(chunk.Content)
+				client.SendToClient("message", chunk.Content)
 			}
 		}
 	}
@@ -96,6 +120,7 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 		sessionMemory.SetMessages(schema.AssistantMessage(content, nil))
 		log.Printf("[chat_stream] fallback completed, session=%s, chars=%d", id, len(content))
 		client.SendToClient("message", content)
+		client.SendToClient("final", content)
 		client.SendToClient("done", "Stream completed")
 		return &v1.ChatStreamRes{}, nil
 	}

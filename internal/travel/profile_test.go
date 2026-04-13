@@ -95,6 +95,19 @@ func TestExtractBookingProfile(t *testing.T) {
 	}
 }
 
+func TestExtractProfileWithDateRange(t *testing.T) {
+	profile := ExtractProfile("我4.13到4.15想去杭州玩3天，预算6000，和女朋友一起，偏好自然风光")
+	if profile.Destination != "杭州" {
+		t.Fatalf("expected destination 杭州, got %q", profile.Destination)
+	}
+	if profile.TravelDate != "4月13日-4月15日" {
+		t.Fatalf("expected travel date range 4月13日-4月15日, got %q", profile.TravelDate)
+	}
+	if !profile.IsPlanningReadyForWeather() {
+		t.Fatalf("expected planning profile to be weather-ready")
+	}
+}
+
 func TestFormatBookingReplyNeedsDepartureCity(t *testing.T) {
 	profile := ExtractProfile("帮我订明天去杭州的高铁")
 	reply := FormatBookingReply(profile)

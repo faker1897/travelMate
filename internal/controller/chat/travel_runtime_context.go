@@ -24,7 +24,7 @@ func buildTravelRuntimeContext(ctx context.Context, query string, profile travel
 }
 
 func buildWeatherRuntimeContext(ctx context.Context, query string, profile travel.Profile) string {
-	if !travel.IsWeatherIntent(query) {
+	if !travel.IsWeatherIntent(query) && !shouldAutoInjectPlanningWeather(query, profile) {
 		return ""
 	}
 
@@ -87,7 +87,7 @@ func buildWeatherRuntimeContext(ctx context.Context, query string, profile trave
 	if output.TravelAdvice != "" {
 		builder.WriteString(fmt.Sprintf("- 对行程的影响：%s\n", output.TravelAdvice))
 	}
-	builder.WriteString("- 回答要求：把天气影响融入行程安排、住宿建议、穿衣建议或室内外活动取舍，不要只单独总结天气。\n")
+	builder.WriteString("- 回答要求：直接输出旅行规划正文，把天气影响融入行程安排、住宿建议、穿衣建议或室内外活动取舍；不要先说“我来帮你查天气”再停住。\n")
 	return builder.String()
 }
 
